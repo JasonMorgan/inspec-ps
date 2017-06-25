@@ -1,0 +1,55 @@
+---
+resources: # This is where we define the resources are pipeline will work with. By resources we mean concourse resources specifically, a pipeline can still use tasks which are essentially arbitrary code that will run as scripts in containers during the build.  Tasks will live in the ci/tasks directory by convention.
+- name: source # Here we're pulling a git repo as well as naming the folder the repo will live in for the duration of the pipeline.  It's worth remembering that the name of this resource will be the name of the folder when you go to access files.
+  type: git
+  source:
+    uri: git@github.com:JasonMorgan/inspec-ps.git
+    ignore_paths: # this is how we escape our infinite commit/build loop. We explicitly ignore the file that gets updated on every build.
+      - ci/vars/tag
+      - Vagrantfile
+      - README.md
+      - .gitignore
+      - ci/*
+    branch: master
+    private_key: {{ssh_key}} # I think it's better to always add a key so the pipeline can make changes to your repo as needed.
+
+- name: docker-image
+  type: docker-image
+  source:
+    repository: docker-registry.digitalglobe.com:443/inspec-ps
+    # tag: source/ci/vars/tag # so this is the literal tag don't fuck with this.  If you set it here it will be static for the duration of the pipeline.
+
+- name: bump
+  type: semver
+  source:
+    driver: git
+    branch: master
+    uri: git@github.com:JasonMorgan/inspec-ps.git
+    file: ci/vars/tag
+    private_key: {{ssh_key}} # This is here so semver can bump our tag as needed.
+
+jobs: #  We're breaking with out into 2 jobs so that we can have 2 tags associated with our image.
+- name: build-docker-image-tagged # Builds the tagged version of our image and increments the version number in github.
+  public: true
+  serial: true
+  plan: # So the order here seems to be firm.  By that I mean the first put resource always seems to run before the second.  We're using that functionality to let the semver resource update git and the local data before the image gets pushed to our registry.s
+  - get: source
+    trigger: true
+  - put: bump
+    params:
+      bump: patch
+  - put: docker-image
+    params:
+      build: source
+      tag: bump/version
+
+- name: build-docker-image-latest # This job just uploads the image again but tags it as latest.  That way every updates will get us 2 tags.
+  public: true
+  serial: true
+  plan:
+  - get: source
+    passed: [build-docker-image-tagged] # This is what allows me to serialize the 2 jobs. Without this entry both jobs would execute in parallel.  That's actually not a big deal but I'd rather serialize them if performance isn't an issue.
+    trigger: true
+  - put: docker-image
+    params:
+      build: source
